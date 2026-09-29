@@ -92,19 +92,26 @@ function h(tag, props, ...kids) {
 }
 
 /* ---------------- reusable inputs ---------------- */
-function scale(value, onPick, { ends, small } = {}) {
+function scale(value, onPick, { ends, label } = {}) {
   const wrap = h("div");
-  const row = h("div", { class: "scale" + (small ? " sm" : "") });
+  const row = h("div", { class: "scale", role: "group", "aria-label": label || null });
+  // Reads like a level meter: every step up to the chosen value fills in.
+  const paint = () => row.querySelectorAll("button").forEach(x => {
+    const v = +x.dataset.v;
+    x.classList.toggle("fill", value != null && v <= value);
+    x.classList.toggle("top", v === value);
+    x.setAttribute("aria-pressed", v === value);
+  });
   for (let v = 1; v <= 5; v++) {
-    const b = h("button", { type: "button", "data-v": v, class: value === v ? "on" : "" }, v);
+    const b = h("button", { type: "button", "data-v": v }, v);
     b.onclick = () => {
-      const next = value === v ? null : v; // tap again to clear
-      value = next;
-      row.querySelectorAll("button").forEach(x => x.classList.toggle("on", +x.dataset.v === next));
-      onPick(next);
+      value = value === v ? null : v; // tap again to clear
+      paint();
+      onPick(value);
     };
     row.append(b);
   }
+  paint();
   wrap.append(row);
   if (ends) wrap.append(h("div", { class: "scale-ends" }, h("span", {}, ends[0]), h("span", {}, ends[1])));
   return wrap;
@@ -208,15 +215,26 @@ function peoplePicker(selected, onChange, noneLabel) {
 }
 
 function field(label, ...kids) { return h("div", { class: "field" }, h("span", { class: "label" }, label), ...kids); }
-function doneDot(on) { return h("span", { class: "done" + (on ? " on" : "") }); }
-function card(title, { when, done, cls, hint } = {}, ...kids) {
-  const dot = tab === "today" ? doneDot(done) : null; // completion ticks only on the check-in screen
-  const c = h("section", { class: "card" + (cls ? " " + cls : "") },
-    h("div", { class: "card-h" }, h("h2", {}, title), when ? h("span", { class: "when" }, when) : null, dot),
+// A stop on the day's line. The node fills in once the check-in is complete.
+function step(title, { cls, hint } = {}, ...kids) {
+  const node = h("span", { class: "node", "aria-hidden": "true" });
+  const gut = h("span", { class: "gut" });
+  const s = h("section", { class: "step" + (cls ? " " + cls : "") },
+    h("div", { class: "step-h" }, node, gut, h("h2", {}, title)),
     hint ? h("p", { class: "hint" }, hint) : null,
     ...kids);
-  c.setDone = on => dot && dot.classList.toggle("on", !!on);
-  return c;
+  let was = null;
+  s.setDone = on => {
+    on = !!on;
+    if (was === false && on) { node.classList.remove("pop"); void node.offsetWidth; node.classList.add("pop"); }
+    node.classList.toggle("on", on); was = on;
+  };
+  s.setTime = t => { gut.textContent = t || ""; };
+  return s;
+}
+function card(title, { cls, hint } = {}, ...kids) {
+  return h("section", { class: "block" + (cls ? " " + cls : "") },
+    h("h2", {}, title), hint ? h("p", { class: "hint" }, hint) : null, ...kids);
 }
 
 /* ---------------- Today ---------------- */
@@ -224,26 +242,43 @@ function renderToday() {
   const d = day(); // chips & people pickers mutate these arrays in place, so bind to the stored day
   const today = logicalToday();
   const n = dayNumber(cur);
-  const label = cur === today ? "Today" : cur === addDays(today, -1) ? "Yesterday" : fmtDay(cur, { weekday: "long" });
+  const rel = cur === today ? "today, " : cur === addDays(today, -1) ? "yesterday, " : "";
 
   const prev = h("button", { class: "nav", "aria-label": "Previous day" }, "‹");
   const next = h("button", { class: "nav", "aria-label": "Next day", disabled: cur >= today }, "›");
   prev.onclick = () => { cur = addDays(cur, -1); render(); };
   next.onclick = () => { cur = addDays(cur, 1); render(); };
-  const top = h("header", { class: "top" }, prev,
-    h("div", { class: "title" }, h("h1", {}, label), h("small", {}, fmtDay(cur) + (n ? ` · Day ${n}${n <= 7 ? " of 7" : ""}` : ""))),
-    next);
+
+  // Seven marks for the baseline week: filled = logged, tall = the day on screen.
+  const first = loggedDays()[0];
+  const wStart = first && n && n <= 7 ? first : addDays(cur, -6);
+  const week = h("nav", { class: "week", "aria-label": "Days of this week" },
+    Array.from({ length: 7 }, (_, i) => {
+      const iso = addDays(wStart, i);
+      const cls = [hasData(db.days[iso]) && "has", iso === cur && "cur", iso > today && "future"].filter(Boolean).join(" ");
+      return h("button", { type: "button", class: cls, disabled: iso > today, "aria-current": iso === cur ? "date" : null,
+        "aria-label": fmtDay(iso, { weekday: "long", day: "numeric", month: "long" }),
+        onclick: () => { cur = iso; render(); } }, h("i"), h("span", {}, fmtDay(iso, { weekday: "narrow" })));
+    }));
+
+  const top = h("header", { class: "top" },
+    h("div", { class: "top-row" },
+      h("div", { class: "top-title" },
+        h("h1", {}, n ? [`day ${n}`, n <= 7 ? h("span", { class: "of" }, "of 7") : null] : "day 1"),
+        h("p", { class: "date" }, rel + fmtDay(cur, { weekday: "long", day: "numeric", month: "long" }).toLowerCase())),
+      h("div", { class: "navs" }, prev, next)),
+    week);
 
   // Every edit goes through here: materialise the day, mutate, save, refresh card ticks.
   const edit = fn => { fn(day()); save(); refreshDone(); };
 
   // Morning
-  const morning = card("Waking", { when: "on waking" },
+  const morning = step("Waking", { hint: "Right after you wake up" },
     field("Wake time", timeInput(d.wake.time, v => edit(x => { x.wake.time = v; }))),
-    field("How you felt on waking", scale(d.wake.feel, v => edit(x => { x.wake.feel = v; }), { ends: ["awful", "great"] })),
+    field("How you felt on waking", scale(d.wake.feel, v => edit(x => { x.wake.feel = v; }), { ends: ["awful", "great"], label: "How you felt on waking" })),
     (() => {
       const det = h("details", { class: "opt", open: d.tracker.rhr || d.tracker.hrv ? true : null },
-        h("summary", {}, "Tracker (optional)"),
+        h("summary", {}, "Heart rate or HRV (optional)"),
         h("div", { class: "two" },
           field("Resting HR (bpm)", num(d.tracker.rhr, v => edit(x => { x.tracker.rhr = v; }))),
           field("HRV (ms)", num(d.tracker.hrv, v => edit(x => { x.tracker.hrv = v; })))));
@@ -255,46 +290,46 @@ function renderToday() {
   const drawMeals = () => {
     mealList.textContent = "";
     const meals = peek(cur).meals.slice().sort((a, b) => (a.time || "99").localeCompare(b.time || "99"));
-    if (!meals.length) mealList.append(h("p", { class: "empty" }, "Nothing logged yet. Add each meal or snack as it happens."));
+    if (!meals.length) mealList.append(h("p", { class: "empty" }, "Nothing yet. Add each meal or snack as it happens."));
     for (const m of meals) {
-      const people = m.with.length ? m.with.map(p => personLabel(p, "alone")).join(", ") : "";
-      const meta = [m.where, people && (m.with.includes(NONE) ? "alone" : "with " + people)].filter(Boolean).join(" · ");
+      const company = !m.with.length ? "" : m.with.includes(NONE) ? "alone" : "with " + m.with.join(", ");
+      const meta = [m.where, company].filter(Boolean).join(", ");
       const due = plus30(m.time);
       const row = h("div", { class: "meal" },
-        h("div", { class: "meal-top" },
-          h("div", { class: "what" }, h("span", { class: "tag" }, m.kind), m.what || h("span", { class: "m" }, "(no description)"),
-            meta ? h("div", { class: "meta" }, meta) : null),
-          h("span", { class: "time" }, m.time || "–:–"),
-          h("button", { type: "button", class: "btn small ghost", onclick: () => openMeal(m, drawMeals) }, "Edit")),
+        h("span", { class: "gut" }, m.time || "–"),
+        h("button", { type: "button", class: "meal-open", "aria-label": `Edit ${m.kind}: ${m.what || "no description"}`, onclick: () => openMeal(m) },
+          h("span", { class: "what" }, m.what || "No description", h("span", { class: "kind" }, m.kind === "snack" ? " (snack)" : "")),
+          meta ? h("span", { class: "meta" }, meta) : null),
         h("div", { class: "after" },
-          h("span", { class: "label" }, h("span", {}, "30 min later"), m.after == null && due ? h("span", {}, "~" + due) : null),
-          scale(m.after, v => edit(() => { m.after = v; }), { small: true })));
+          h("span", { class: "label" }, h("span", {}, "How you felt 30 min after"), m.after == null && due ? h("span", {}, "at " + due) : null),
+          scale(m.after, v => edit(() => { m.after = v; }), { label: "How you felt 30 minutes after" })));
       mealList.append(row);
     }
   };
   drawMeals();
-  const meals = card("Meals & snacks", { when: "every one" }, mealList,
-    h("button", { type: "button", class: "btn primary wide", onclick: () => openMeal(null, drawMeals) }, "+ Add meal or snack"));
+  mealList.className = "meals";
+  const meals = step("Meals and snacks", { hint: "What, when, where, with whom. Rate each one half an hour later." }, mealList,
+    h("button", { type: "button", class: "btn primary wide", onclick: () => openMeal(null) }, "Add a meal or snack"));
 
   // Energy
   const hr = new Date().getHours();
   const nowSlot = cur !== today ? null : hr < 12 ? "10" : hr < 16 ? "14" : "18";
-  const energy = card("Energy", { when: "10 · 14 · 18" },
+  const energy = step("Energy", { hint: "At 10:00, 14:00 and 18:00" },
     ...ENERGY.map(([k, t]) => h("div", { class: "energy-row" + (k === nowSlot ? " now" : "") },
-      h("span", { class: "t" }, t),
-      scale(d.energy[k], v => edit(x => { x.energy[k] = v; }), { small: true }))),
-    h("div", { class: "scale-ends", style: "margin-left:62px" }, h("span", {}, "drained"), h("span", {}, "full")));
+      h("span", { class: "gut" }, t),
+      scale(d.energy[k], v => edit(x => { x.energy[k] = v; }), { label: "Energy at " + t }))),
+    h("div", { class: "scale-ends" }, h("span", {}, "drained"), h("span", {}, "full")));
 
-  const moment = (kind, title, hint, signals) => card(title, { cls: kind, hint },
+  const moment = (kind, title, hint, signals) => step(title, { cls: kind, hint },
     field("Signal", chips(signals, d[kind].signals, () => edit(() => {})),
       h("div", { style: "margin-top:8px" }, text(d[kind].other, v => edit(x => { x[kind].other = v; }), { placeholder: "Something else…" }))),
     field("When", timeInput(d[kind].time, v => edit(x => { x[kind].time = v; }))),
     field("What you were doing", text(d[kind].doing, v => edit(x => { x[kind].doing = v; }), { area: true, placeholder: "e.g. on a call, in the car, cooking" })),
-    field("Who was within ~6 ft", peoplePicker(d[kind].near, () => edit(() => {}), "No one")));
-  const noCard = moment("no", "Body said no", "Tightness, fatigue, nausea, irritation…", NO_SIGNALS);
-  const yesCard = moment("yes", "Body said yes", "Ease, appetite, calm, clarity…", YES_SIGNALS);
+    field("Who was within six feet", peoplePicker(d[kind].near, () => edit(() => {}), "No one")));
+  const noCard = moment("no", "Body said no", "One moment of tightness, fatigue, nausea or irritation", NO_SIGNALS);
+  const yesCard = moment("yes", "Body said yes", "One moment of ease, appetite, calm or clarity", YES_SIGNALS);
 
-  const night = card("Night", { when: "at bedtime or next morning" },
+  const night = step("Night", { hint: "At bedtime, or first thing tomorrow" },
     field("Bedtime", timeInput(d.bed.time, v => edit(x => { x.bed.time = v; }))),
     field("How you fell asleep", chips(SLEEP, d.bed.how, () => edit(() => {})),
       h("div", { style: "margin-top:8px" }, text(d.bed.note, v => edit(x => { x.bed.note = v; }), { placeholder: "Anything else (optional)" }))));
@@ -307,11 +342,12 @@ function renderToday() {
     noCard.setDone((x.no.signals.length || x.no.other) && x.no.doing && x.no.near.length);
     yesCard.setDone((x.yes.signals.length || x.yes.other) && x.yes.doing && x.yes.near.length);
     night.setDone(x.bed.time && (x.bed.how.length || x.bed.note));
+    morning.setTime(x.wake.time); noCard.setTime(x.no.time); yesCard.setTime(x.yes.time); night.setTime(x.bed.time);
   }
   refreshDone();
 
-  return [top, morning, meals, energy, noCard, yesCard, night,
-    h("p", { class: "small", style: "text-align:center;margin-top:18px" }, "Notice, don't correct. This is a baseline, not a cleanse.")];
+  return [top, h("div", { class: "day" }, morning, meals, energy, noCard, yesCard, night),
+    h("p", { class: "coda" }, "Notice, don’t correct. This is a baseline, not a cleanse.")];
 }
 
 function num(value, onInput) {
@@ -321,7 +357,7 @@ function num(value, onInput) {
 }
 
 /* ---------------- meal sheet ---------------- */
-function openMeal(existing, redraw) {
+function openMeal(existing) {
   const isToday = cur === logicalToday();
   const m = existing ? JSON.parse(JSON.stringify(existing))
     : { id: Date.now().toString(36), kind: "meal", what: "", time: isToday ? nowHM() : "", where: "", with: [], after: null, note: "" };
@@ -348,24 +384,29 @@ function openMeal(existing, redraw) {
   };
   const del = existing ? h("button", { type: "button", class: "btn danger" }, "Delete") : null;
   if (del) del.onclick = () => {
-    if (!confirm("Delete this entry?")) return;
+    if (!confirm(`Delete this ${m.kind}?`)) return;
     const d = day(); d.meals = d.meals.filter(x => x.id !== m.id); save(); close(); render();
   };
 
   const sheet = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" },
-    h("h2", {}, existing ? "Edit entry" : "Meal or snack"),
+    h("h2", {}, existing ? "Edit " + m.kind : "Meal or snack"),
     seg,
     field("What", text(m.what, v => { m.what = v; }, { area: true, placeholder: "What you ate or drank" })),
     field("When", timeInput(m.time, v => { m.time = v; })),
     field("Where", whereInput, placeChips),
     field("With whom", peoplePicker(m.with, () => {}, "Alone")),
-    field("How you felt 30 min after", scale(m.after, v => { m.after = v; }, { small: true, ends: ["awful", "great"] }),
-      h("p", { class: "small", style: "margin:6px 0 0" }, "Leave blank now and rate it from the list later.")),
+    field("How you felt 30 min after", scale(m.after, v => { m.after = v; }, { ends: ["awful", "great"], label: "How you felt 30 minutes after" }),
+      h("p", { class: "small", style: "margin:8px 0 0" }, "Leave it for now and rate it from the list later.")),
     field("Note (optional)", text(m.note, v => { m.note = v; }, { placeholder: "e.g. bloated, sleepy, clear" })),
     h("div", { class: "sheet-actions" }, del, h("button", { type: "button", class: "btn", onclick: close }, "Cancel"), saveBtn));
   const overlay = h("div", { class: "overlay", onclick: e => { if (e.target === overlay) close(); } }, sheet);
   document.body.append(overlay);
-  void redraw;
+}
+
+function pageHead(title, sub, navs) {
+  return h("header", { class: "top" }, h("div", { class: "top-row" },
+    h("div", { class: "top-title" }, h("h1", {}, title), h("p", { class: "date" }, sub)),
+    navs ? h("div", { class: "navs" }, navs) : null));
 }
 
 /* ---------------- 7-day review ---------------- */
@@ -383,12 +424,12 @@ function renderReview() {
   const next = h("button", { class: "nav", "aria-label": "Next week", disabled: revEnd >= logicalToday() }, "›");
   prev.onclick = () => { revEnd = addDays(revEnd, -7); render(); };
   next.onclick = () => { revEnd = addDays(revEnd, 7); render(); };
-  const top = h("header", { class: "top" }, prev,
-    h("div", { class: "title" }, h("h1", {}, "7 days"), h("small", {}, `${fmtDay(start)} – ${fmtDay(revEnd)}`)), next);
+  const dm = { day: "numeric", month: "long" };
+  const top = pageHead("7 days", `${fmtDay(start, dm)} to ${fmtDay(revEnd, dm)}`.toLowerCase(), [prev, next]);
 
   const inRange = days.filter(i => hasData(db.days[i]));
   if (!inRange.length) {
-    return [top, card("Nothing here yet", {}, h("p", { class: "empty" }, "Once you've logged a few days, patterns show up here: your daily scores side by side, and who was nearby when your body said yes or no."))];
+    return [top, card("Nothing logged this week", {}, h("p", { class: "hint" }, "Log a few days on the Today tab. Your scores then line up here side by side, along with who was nearby each time your body said yes or no."))];
   }
 
   // Daily grid
@@ -403,9 +444,9 @@ function renderReview() {
         cell(d.wake.feel, d.wake.time),
         cell(d.energy[10]), cell(d.energy[14]), cell(d.energy[18]),
         cell(avg(d.meals.map(m => m.after)), d.meals.length ? `${d.meals.length}×` : ""),
-        h("td", { class: d.bed.time ? "" : "nil" }, d.bed.time || "·"));
+        h("td", { class: d.bed.time ? "bed" : "nil" }, d.bed.time || "·"));
     })));
-  const scores = card("Day by day", { hint: "1 = low, 5 = high. Meals column = average feeling 30 min after eating." }, h("div", { class: "scroll-x" }, grid));
+  const scores = card("Scores", { hint: "The stronger the tone, the higher the score, from 1 to 5. Meals shows the average of how you felt 30 minutes after eating." }, h("div", { class: "scroll-x" }, grid));
 
   // Who was near when the body said yes / no
   const tally = {};
@@ -427,18 +468,21 @@ function renderReview() {
   const order = Object.keys(tally).sort((a, b) =>
     (a === NONE) - (b === NONE) || (a === "__unknown") - (b === "__unknown") ||
     (tally[b].yes + tally[b].no) - (tally[a].yes + tally[a].no));
-  const pill = (n, k) => h("span", { class: `pill ${k}${n ? "" : " zero"}` }, n);
+  // One mark per moment, so a lopsided person is visible at a glance.
+  const marks = (n, k) => h("div", { class: "marks", "aria-label": `${n} ${k}` },
+    !n ? h("span", { class: "zero" }, "0") : n > 8 ? [h("i", { class: "mark " + k }), h("b", {}, "×" + n)]
+      : Array.from({ length: n }, () => h("i", { class: "mark " + k })));
   const uniq = a => [...new Set(a.map(s => s.toLowerCase()))].join(", ");
-  const people = card("Who was within ~6 ft", {
-    hint: "Signals that show up whoever is around (or when no one is) are more likely yours. Signals that cluster around one person may be picked up through your open centers.",
+  const people = card("Who was within six feet", {
+    hint: "Signals that come whoever is around, or when no one is, are more likely yours. Signals that gather around one person may be coming in through your open centers.",
   }, h("table", { class: "people" },
-    h("thead", {}, h("tr", {}, h("th", {}, "Person"), h("th", {}, "Yes"), h("th", {}, "No"))),
+    h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Yes"), h("th", {}, "No"))),
     h("tbody", {}, order.map(p => h("tr", {},
-      h("td", {}, p === NONE ? "No one" : p === "__unknown" ? h("span", { class: "m" }, "Not recorded") : p,
+      h("td", { class: "who" }, p === NONE ? "No one" : p === "__unknown" ? h("span", { class: "m" }, "Not recorded") : p,
         tally[p].ns.length ? h("span", { class: "sig" }, "no: " + uniq(tally[p].ns)) : null,
         tally[p].ys.length ? h("span", { class: "sig" }, "yes: " + uniq(tally[p].ys)) : null),
-      h("td", { class: "n" }, pill(tally[p].yes, "yes")),
-      h("td", { class: "n" }, pill(tally[p].no, "no")))))));
+      h("td", {}, marks(tally[p].yes, "yes")),
+      h("td", {}, marks(tally[p].no, "no")))))));
 
   // Meals by company and by place
   const groups = (keyFn) => {
@@ -448,33 +492,35 @@ function renderReview() {
     }
     return Object.entries(g).map(([k, v]) => [k, v.length, avg(v)]).sort((a, b) => b[1] - a[1]);
   };
-  const mealTable = (title, rows) => rows.length ? h("div", { class: "field" }, h("span", { class: "label" }, title),
-    h("table", { class: "people" }, h("tbody", {}, rows.map(([k, n, a]) => h("tr", {},
-      h("td", {}, k), h("td", { class: "n small" }, n + "×"),
-      h("td", { class: "n" }, a == null ? h("span", { class: "m" }, "–") : h("span", { class: "pill " + (a >= 3.5 ? "yes" : a < 2.5 ? "no" : "") }, a.toFixed(1)))))))) : null;
+  const mealTable = (title, rows) => rows.length ? h("table", { class: "people" },
+    h("thead", {}, h("tr", {}, h("th", {}, title), h("th", {}, "Times"), h("th", { style: "text-align:right" }, "After"))),
+    h("tbody", {}, rows.map(([k, n, a]) => h("tr", {},
+      h("td", { class: "who" }, k), h("td", { class: "m" }, n + "×"),
+      h("td", { style: "text-align:right" }, a == null ? h("span", { class: "num m" }, "–") : h("span", { class: "num" }, a.toFixed(1))))))) : null;
   const byWho = groups(m => m.with.length ? m.with.map(p => p === NONE ? "Alone" : p) : ["Not recorded"]);
   const byWhere = groups(m => [m.where || "Not recorded"]);
-  const mealsCard = byWho.length ? card("Meals", { hint: "How many times, and average feeling 30 min after." },
+  const mealsCard = byWho.length ? card("Meals", { hint: "How often, and how you felt 30 minutes after on average." },
     mealTable("By company", byWho), mealTable("By place", byWhere)) : null;
 
   // Day journal
   const who = l => l.length ? l.map(p => personLabel(p)).join(", ") : "not recorded";
-  const journal = card("Log", {}, inRange.map(i => {
+  const journal = card("The week in words", {}, inRange.map(i => {
     const d = db.days[i];
     const line = (kind) => {
       const m = d[kind];
       if (!momentHas(m)) return null;
       const sigs = [...m.signals, m.other].filter(Boolean).join(", ").toLowerCase();
-      return h("p", {}, h("b", { class: kind }, kind === "yes" ? "Yes " : "No "), m.time ? h("span", { class: "m" }, m.time + " ") : null,
-        sigs, m.doing ? ` — ${m.doing}` : "", h("span", { class: "m" }, ` · near: ${who(m.near)}`));
+      return h("p", {}, h("span", { class: "k" }, h("i", { class: "mark " + kind }), kind === "yes" ? "Yes" : "No"),
+        m.time ? h("span", { class: "m" }, m.time + " ") : null,
+        sigs, m.doing ? `, ${m.doing}` : "", h("span", { class: "m" }, `. Near: ${who(m.near).toLowerCase()}`));
     };
-    const tr = [d.tracker.rhr && `RHR ${d.tracker.rhr}`, d.tracker.hrv && `HRV ${d.tracker.hrv}`].filter(Boolean).join(" · ");
-    return h("div", { class: "day-log" }, h("h3", {}, fmtDay(i, { weekday: "long", day: "numeric", month: "short" })),
+    const tr = [d.tracker.rhr && `Resting HR ${d.tracker.rhr}`, d.tracker.hrv && `HRV ${d.tracker.hrv}`].filter(Boolean).join(", ");
+    return h("div", { class: "day-log" }, h("h3", {}, fmtDay(i, { weekday: "long", day: "numeric", month: "long" })),
       d.meals.length ? h("p", {}, h("span", { class: "m" }, "Ate: "),
         d.meals.slice().sort((a, b) => (a.time || "").localeCompare(b.time || "")).map(m => `${m.time ? m.time + " " : ""}${m.what || m.kind}${m.after ? ` (${m.after})` : ""}`).join("; ")) : null,
       line("no"), line("yes"),
       d.bed.time || d.bed.how.length || d.bed.note ? h("p", {}, h("span", { class: "m" }, "Night: "),
-        [d.bed.time, d.bed.how.join(", ").toLowerCase(), d.bed.note].filter(Boolean).join(" · ")) : null,
+        [d.bed.time, d.bed.how.join(", ").toLowerCase(), d.bed.note].filter(Boolean).join(", ")) : null,
       tr ? h("p", { class: "m" }, tr) : null);
   }));
 
@@ -507,12 +553,12 @@ function renderInfo() {
   };
 
   return [
-    h("header", { class: "top" }, h("div", { class: "title" }, h("h1", {}, "About this log"), h("small", {}, `${logged.length} day${logged.length === 1 ? "" : "s"} logged`))),
+    pageHead("about", `${logged.length} day${logged.length === 1 ? "" : "s"} logged on this phone`),
     card("Rules", { cls: "info" }, h("ul", {},
-      h("li", {}, h("b", {}, "Don't correct anything you notice. "), "This is a baseline, not a cleanse."),
+      h("li", {}, h("b", {}, "Don’t correct anything you notice. "), "This is a baseline, not a cleanse."),
       h("li", {}, h("b", {}, "Same format every day "), "so patterns are visible."),
       h("li", {}, h("b", {}, "Keep it short. "), "Two minutes at each check-in."),
-      h("li", {}, h("b", {}, "Keep your log private. "), "Please don't post personal health details in comments."))),
+      h("li", {}, h("b", {}, "Keep your log private. "), "Please don’t post personal health details in comments."))),
     card("Each day", { cls: "info" }, h("ul", {},
       h("li", {}, "Wake time and how you felt on waking (1–5)"),
       h("li", {}, "Every meal or snack: what, when, where, with whom, and how you felt 30 min after"),
@@ -520,12 +566,12 @@ function renderInfo() {
       h("li", {}, "One moment your body said no, and one it said yes: what you were doing and who was within about six feet"),
       h("li", {}, "Bedtime and how you fell asleep"),
       h("li", {}, "Optional: resting heart rate or HRV each morning")),
-      h("p", { class: "small" }, "Over seven days, the 7 days tab shows which signals are yours and which you may be picking up through your open centers. Entries made before 4am count toward the previous day.")),
+      h("p", { class: "small" }, "After seven days, the 7 days tab shows which signals are yours and which you may be picking up through your open centers. Anything you enter before 4am counts toward the previous day.")),
     card("Your data", { cls: "info" },
-      h("p", { class: "small", style: "margin-top:0" }, "Everything stays on this phone. Nothing is sent anywhere. Deleting the app from your home screen deletes the log, so save a backup now and then."),
+      h("p", { class: "hint" }, "Everything stays on this phone. Nothing is sent anywhere. Removing the app from your home screen deletes the log, so save a backup now and then."),
       h("div", { class: "stack" }, exportBtn, backupBtn, restoreBtn, file, eraseBtn)),
-    card("Put it on your home screen", { cls: "info" }, h("p", { class: "small", style: "margin:0" },
-      "iPhone: open this page in Safari → Share → Add to Home Screen. Android: Chrome menu → Add to Home screen / Install app.")),
+    card("Put it on your home screen", { cls: "info" }, h("p", { class: "hint" },
+      "On iPhone, open this page in Safari, tap Share, then Add to Home Screen. On Android, open the Chrome menu and tap Add to Home screen.")),
   ];
 }
 

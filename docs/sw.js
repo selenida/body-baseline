@@ -1,6 +1,8 @@
 // Bump on every deploy, or phones keep serving the old build.
-const CACHE = "baseline-v1";
-const FILES = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-180.png", "icons/icon-512.png"];
+const CACHE = "baseline-v2";
+const FILES = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-180.png", "icons/icon-512.png",
+  "fonts/archivo-latin-wdth-normal.woff2", "fonts/archivo-latin-ext-wdth-normal.woff2",
+  "fonts/instrument-sans-latin-wdth-normal.woff2", "fonts/instrument-sans-latin-ext-wdth-normal.woff2"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
