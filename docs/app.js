@@ -38,19 +38,24 @@ function blankDay() {
     no: blankMoment(),
     yes: blankMoment(),
     bed: { time: "", how: [], note: "" },
+    env: blankEnv(),
   };
 }
+// Evening environment check-in (added after launch, so older days get it on first touch).
+function blankEnv() { return { place: "", energy: null, calm: null, met: [] }; }
+function withEnv(d) { if (!d.env) d.env = blankEnv(); return d; }
+function envHas(e) { return !!(e && (e.place || e.energy || e.calm || e.met.length)); }
 function day(iso = cur) {
   if (!db.days[iso]) db.days[iso] = blankDay();
-  return db.days[iso];
+  return withEnv(db.days[iso]);
 }
-function peek(iso) { return db.days[iso] || blankDay(); }
+function peek(iso) { return db.days[iso] ? withEnv(db.days[iso]) : blankDay(); }
 function momentHas(m) { return !!(m.signals.length || m.other || m.doing || m.time || m.near.length); }
 function hasData(d) {
   if (!d) return false;
   return !!(d.wake.time || d.wake.feel || d.tracker.rhr || d.tracker.hrv || d.meals.length ||
     d.energy[10] || d.energy[14] || d.energy[18] || momentHas(d.no) || momentHas(d.yes) ||
-    d.bed.time || d.bed.how.length || d.bed.note);
+    d.bed.time || d.bed.how.length || d.bed.note || envHas(d.env));
 }
 
 /* ---------------- dates ---------------- */
@@ -152,14 +157,17 @@ function chips(options, selected, onChange) {
 function knownPeople() {
   const n = {};
   for (const d of Object.values(db.days)) {
-    const lists = [d.no.near, d.yes.near, ...d.meals.map(m => m.with)];
+    const lists = [d.no.near, d.yes.near, ...d.meals.map(m => m.with), ...(d.env ? d.env.met.map(m => m.who) : [])];
     for (const l of lists) for (const p of l) if (p !== NONE) n[p] = (n[p] || 0) + 1;
   }
   return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b));
 }
 function knownPlaces() {
   const n = {};
-  for (const d of Object.values(db.days)) for (const m of d.meals) if (m.where) n[m.where] = (n[m.where] || 0) + 1;
+  for (const d of Object.values(db.days)) {
+    for (const m of d.meals) if (m.where) n[m.where] = (n[m.where] || 0) + 1;
+    if (d.env && d.env.place) n[d.env.place] = (n[d.env.place] || 0) + 1;
+  }
   return Object.keys(n).sort((a, b) => n[b] - n[a]).slice(0, 8);
 }
 function personLabel(p, noneLabel = "No one") { return p === NONE ? noneLabel : p; }
@@ -171,14 +179,16 @@ function peoplePicker(selected, onChange, noneLabel) {
     wrap.textContent = "";
     const names = [...new Set([...knownPeople(), ...selected.filter(p => p !== NONE)])];
     const box = h("div", { class: "chips" });
-    const noneChip = h("button", { type: "button", class: "chip" + (selected.includes(NONE) ? " on" : "") }, noneLabel);
-    noneChip.onclick = () => {
-      const had = selected.includes(NONE);
-      selected.splice(0, selected.length);
-      if (!had) selected.push(NONE);
-      onChange(); draw();
-    };
-    box.append(noneChip);
+    if (noneLabel) {
+      const noneChip = h("button", { type: "button", class: "chip" + (selected.includes(NONE) ? " on" : "") }, noneLabel);
+      noneChip.onclick = () => {
+        const had = selected.includes(NONE);
+        selected.splice(0, selected.length);
+        if (!had) selected.push(NONE);
+        onChange(); draw();
+      };
+      box.append(noneChip);
+    }
     for (const p of names) {
       const c = h("button", { type: "button", class: "chip" + (selected.includes(p) ? " on" : "") }, p);
       c.onclick = () => {
@@ -238,8 +248,7 @@ function card(title, { cls, hint } = {}, ...kids) {
 }
 
 /* ---------------- Today ---------------- */
-function renderToday() {
-  const d = day(); // chips & people pickers mutate these arrays in place, so bind to the stored day
+function dayHeader() {
   const today = logicalToday();
   const n = dayNumber(cur);
   const rel = cur === today ? "today, " : cur === addDays(today, -1) ? "yesterday, " : "";
@@ -268,6 +277,13 @@ function renderToday() {
         h("p", { class: "date" }, rel + fmtDay(cur, { weekday: "long", day: "numeric", month: "long" }).toLowerCase())),
       h("div", { class: "navs" }, prev, next)),
     week);
+  return top;
+}
+
+function renderToday() {
+  const d = day(); // chips & people pickers mutate these arrays in place, so bind to the stored day
+  const today = logicalToday();
+  const top = dayHeader();
 
   // Every edit goes through here: materialise the day, mutate, save, refresh card ticks.
   const edit = fn => { fn(day()); save(); refreshDone(); };
@@ -348,6 +364,83 @@ function renderToday() {
 
   return [top, h("div", { class: "day" }, morning, meals, energy, noCard, yesCard, night),
     h("p", { class: "coda" }, "Notice, don’t correct. This is a baseline, not a cleanse.")];
+}
+
+/* ---------------- Place (evening environment check-in) ---------------- */
+function renderPlace() {
+  const d = day();
+  const e = d.env;
+  const edit = fn => { fn(e); save(); refreshDone(); };
+
+  const whereInput = text(e.place, v => edit(x => { x.place = v; }), { placeholder: "e.g. home office, café, studio" });
+  const places = knownPlaces();
+  const where = step("Where you were", { hint: "The place you spent most of today" }, h("div", { class: "field" }, whereInput),
+    places.length ? h("div", { class: "chips", style: "margin-top:8px" },
+      places.map(p => h("button", { type: "button", class: "chip", onclick: () => { whereInput.value = p; edit(x => { x.place = p; }); } }, p))) : null);
+
+  const energy = step("Energy", { hint: "Left arrow, Observed: in its right place the body is stimulated and moves toward others. In the wrong place it struggles to find energy. (Ra, p. 46)" },
+    h("div", { class: "field" }, scale(e.energy, v => edit(x => { x.energy = v; }), { ends: ["flat", "lit up"], label: "Energy in this place" })));
+  const calm = step("Calm", { hint: "Right arrow, Observer: the body is sensitive to the frequencies around it and quiets in its correct environment. (Ra, p. 65)" },
+    h("div", { class: "field" }, scale(e.calm, v => edit(x => { x.calm = v; }), { ends: ["buzzing", "quiet"], label: "Calm in this place" })));
+
+  const list = h("div");
+  const drawMet = () => {
+    list.textContent = "";
+    if (!e.met.length) list.append(h("p", { class: "empty" }, "No one yet. Add each person or group you met there."));
+    for (const m of e.met) {
+      const remove = h("button", { type: "button", class: "btn small", onclick: () => { e.met = e.met.filter(x => x !== m); save(); drawMet(); refreshDone(); } }, "Remove");
+      list.append(h("div", { class: "meeting" },
+        field("Who", peoplePicker(m.who, () => edit(() => {}), null)),
+        field("How it felt", scale(m.felt, v => edit(() => { m.felt = v; }), { ends: ["draining", "nourishing"], label: "How the meeting felt" })),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("div", { class: "grow" }, text(m.note, v => edit(() => { m.note = v; }), { placeholder: "In a few words (optional)" })), remove)));
+    }
+  };
+  drawMet();
+  const met = step("Who you met there", { hint: "And how each meeting felt" }, list,
+    h("button", { type: "button", class: "btn primary wide", onclick: () => {
+      e.met.push({ id: Date.now().toString(36), who: [], felt: null, note: "" }); save(); drawMet(); refreshDone();
+    } }, "Add a meeting"));
+
+  function refreshDone() {
+    where.setDone(e.place); energy.setDone(e.energy); calm.setDone(e.calm);
+    met.setDone(e.met.length && e.met.every(m => m.who.length && m.felt));
+  }
+  refreshDone();
+
+  return [dayHeader(), h("div", { class: "day" }, where, energy, calm, met),
+    h("p", { class: "coda" }, "Fill this in each evening."), placePatterns()];
+}
+
+// Across every logged evening: how each place and each person tends to land.
+function placePatterns() {
+  const avg = a => { const x = a.filter(v => v != null); return x.length ? x.reduce((s, v) => s + v, 0) / x.length : null; };
+  const fmt = v => v == null ? h("span", { class: "num m" }, "–") : h("span", { class: "num" }, v.toFixed(1));
+  const byPlace = {}, byPerson = {};
+  for (const i of loggedDays()) {
+    const e = db.days[i].env;
+    if (!envHas(e)) continue;
+    const p = e.place || "Not recorded";
+    (byPlace[p] = byPlace[p] || []).push(e);
+    for (const m of e.met) for (const who of m.who) (byPerson[who] = byPerson[who] || []).push(m.felt);
+  }
+  const places = Object.entries(byPlace).sort((a, b) => b[1].length - a[1].length);
+  if (!places.length) return null;
+  const people = Object.entries(byPerson).sort((a, b) => b[1].length - a[1].length);
+  return card("What the evenings show", {
+    hint: "Averages across every evening you've logged. Left arrow: watch energy. Right arrow: watch calm.",
+  },
+    h("table", { class: "people" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Place"), h("th", { style: "text-align:right" }, "Energy"), h("th", { style: "text-align:right" }, "Calm"))),
+      h("tbody", {}, places.map(([p, es]) => h("tr", {},
+        h("td", { class: "who" }, p, h("span", { class: "sig" }, es.length + (es.length === 1 ? " evening" : " evenings"))),
+        h("td", { style: "text-align:right" }, fmt(avg(es.map(e => e.energy)))),
+        h("td", { style: "text-align:right" }, fmt(avg(es.map(e => e.calm)))))))),
+    people.length ? h("table", { class: "people" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Person"), h("th", {}, "Times"), h("th", { style: "text-align:right" }, "Felt"))),
+      h("tbody", {}, people.map(([p, fs]) => h("tr", {},
+        h("td", { class: "who" }, p), h("td", { class: "m" }, fs.length + "×"),
+        h("td", { style: "text-align:right" }, fmt(avg(fs))))))) : null);
 }
 
 function num(value, onInput) {
@@ -519,6 +612,9 @@ function renderReview() {
       d.meals.length ? h("p", {}, h("span", { class: "m" }, "Ate: "),
         d.meals.slice().sort((a, b) => (a.time || "").localeCompare(b.time || "")).map(m => `${m.time ? m.time + " " : ""}${m.what || m.kind}${m.after ? ` (${m.after})` : ""}`).join("; ")) : null,
       line("no"), line("yes"),
+      envHas(d.env) ? h("p", {}, h("span", { class: "m" }, "Place: "),
+        [d.env.place || "not recorded", d.env.energy && `energy ${d.env.energy}`, d.env.calm && `calm ${d.env.calm}`].filter(Boolean).join(", "),
+        d.env.met.length ? h("span", { class: "m" }, ". Met: " + d.env.met.map(m => `${m.who.join(" & ") || "someone"}${m.felt ? ` (${m.felt})` : ""}`).join(", ")) : null) : null,
       d.bed.time || d.bed.how.length || d.bed.note ? h("p", {}, h("span", { class: "m" }, "Night: "),
         [d.bed.time, d.bed.how.join(", ").toLowerCase(), d.bed.note].filter(Boolean).join(", ")) : null,
       tr ? h("p", { class: "m" }, tr) : null);
@@ -565,6 +661,7 @@ function renderInfo() {
       h("li", {}, "Energy at 10:00, 14:00, 18:00 (1–5)"),
       h("li", {}, "One moment your body said no, and one it said yes: what you were doing and who was within about six feet"),
       h("li", {}, "Bedtime and how you fell asleep"),
+      h("li", {}, "In the evening, on the Place tab: where you spent most of the day, energy and calm there (1–5), and who you met and how it felt"),
       h("li", {}, "Optional: resting heart rate or HRV each morning")),
       h("p", { class: "small" }, "After seven days, the 7 days tab shows which signals are yours and which you may be picking up through your open centers. Anything you enter before 4am counts toward the previous day.")),
     card("Your data", { cls: "info" },
@@ -591,6 +688,11 @@ function toCSV() {
       if (momentHas(m)) rows.push([i, "body_" + kind, m.time, "", m.doing, "", ppl(m.near), [...m.signals, m.other].filter(Boolean).join("; ")]);
     }
     if (d.bed.time || d.bed.how.length || d.bed.note) rows.push([i, "bed", d.bed.time, "", "", "", "", d.bed.how.join("; "), d.bed.note]);
+    if (envHas(d.env)) {
+      rows.push([i, "place_energy", "", d.env.energy, "", d.env.place]);
+      rows.push([i, "place_calm", "", d.env.calm, "", d.env.place]);
+      for (const m of d.env.met) rows.push([i, "meeting", "", m.felt, "", d.env.place, m.who.join("; "), "", m.note]);
+    }
   }
   return rows.map(r => r.map(csvCell).join(",")).join("\n");
 }
@@ -608,7 +710,8 @@ function render() {
   const view = document.getElementById("view");
   const y = tab === "today" ? window.scrollY : 0;
   view.textContent = "";
-  view.append(...(tab === "today" ? renderToday() : tab === "review" ? renderReview() : renderInfo()).filter(Boolean));
+  const screens = { today: renderToday, place: renderPlace, review: renderReview, info: renderInfo };
+  view.append(...screens[tab]().filter(Boolean));
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   window.scrollTo(0, y);
 }

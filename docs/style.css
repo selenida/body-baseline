@@ -209,6 +209,8 @@ textarea { resize: none; field-sizing: content; }
 .meal .after { margin-top: 8px; }
 .empty { color: var(--muted); font-size: 15px; margin: 12px 0 14px; }
 
+.meeting { padding: 4px 0 16px; border-bottom: 1.5px solid var(--rule); margin-bottom: 14px; }
+.meeting:first-child { border-top: 1.5px solid var(--rule); margin-top: 14px; }
 details.opt { margin-top: 16px; }
 details.opt summary { font-size: 14px; font-weight: 600; color: var(--muted); list-style: none; cursor: pointer; min-height: 32px; display: flex; align-items: center; }
 details.opt summary::before { content: "+"; width: 18px; }
