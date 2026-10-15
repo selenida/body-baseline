@@ -1,12 +1,12 @@
 {
   "name": "Baseline",
   "short_name": "Baseline",
-  "description": "A private 7-day body baseline log.",
+  "description": "A private 30-day open-center tracking experiment.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#eef0e8",
-  "theme_color": "#eef0e8",
+  "background_color": "#FBFBFA",
+  "theme_color": "#FBFBFA",
   "icons": [
     { "src": "icons/icon-180.png", "sizes": "180x180", "type": "image/png" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
