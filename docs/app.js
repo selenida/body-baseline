@@ -25,6 +25,8 @@ const SCORES = [["energy", "Energy", "#E08A3C"], ["clarity", "Clarity", "#4F95B8
 const SLEEP_C = "#7C68B5";
 const WOKE = [["rested", "Rested", "#2F8F6B"], ["neutral", "Neutral", "#7A8794"], ["fatigued", "Fatigued", "#E0754B"]];
 const LATER = [["fine", "Felt fine", "#2F8F6B"], ["mild", "Mild reaction", "#E3AC47"], ["strong", "Strong reaction", "#D25B55"]];
+const CHECKS = [["10", "10:00"], ["14", "14:00"], ["18", "18:00"]];
+const COMPANY = [["alone", "Alone", "#7A8794"], ["with", "With someone", "#4F95B8"]];
 const RESET = [["1h", "Under 1 h", "#2F8F6B"], ["3h", "1–3 h", "#A3B957"], ["half", "Half a day", "#E3AC47"], ["next", "Next day", "#E0754B"], ["not", "Not yet", "#B8445C"]];
 const TAG_COLORS = ["#4F95B8", "#6E9E5E", "#E08A3C", "#7C68B5", "#C9467A", "#B9784A", "#D9A93F", "#3F9C93"];
 
@@ -59,20 +61,22 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 function blankDay() {
   return {
     sleep: null, hours: "", woke: "", mind: "", body: "",
-    c: {}, energy: null, clarity: null, mood: null,
+    c: {}, energy: null, clarity: null, mood: null, checks: {},
     places: [], placeNote: "", people: [], peopleNote: "", group: null, reset: "",
     food: [], foodNote: "", unusual: "",
   };
 }
-function day(iso = cur) { if (!db.days[iso]) db.days[iso] = blankDay(); return db.days[iso]; }
-function peek(iso) { return db.days[iso] || null; }
+// Fields added after launch get filled in lazily, so earlier days still load.
+function upgrade(d) { if (!d.checks) d.checks = {}; return d; }
+function day(iso = cur) { if (!db.days[iso]) db.days[iso] = blankDay(); return upgrade(db.days[iso]); }
+function peek(iso) { return db.days[iso] ? upgrade(db.days[iso]) : null; }
 function morningDone(d) { return !!(d && d.sleep && d.hours && d.woke); }
 function centersDone(d) { return !!(d && CENTERS.every(([k]) => d.c[k])); }
 function scoresDone(d) { return !!(d && SCORES.every(([k]) => d[k])); }
 function anyData(d) {
   if (!d) return false;
   return !!(d.sleep || d.hours || d.woke || d.mind || d.body || Object.keys(d.c).length || d.energy || d.clarity || d.mood ||
-    d.places.length || d.placeNote || d.people.length || d.peopleNote || d.group != null || d.food.length || d.foodNote || d.unusual);
+    d.places.length || d.placeNote || d.people.length || d.peopleNote || d.group != null || Object.keys(d.checks || {}).length || d.food.length || d.foodNote || d.unusual);
 }
 function status(iso) {
   const d = peek(iso);
@@ -114,7 +118,8 @@ function averages(isos) {
   const ds = isos.map(peek).filter(Boolean);
   const a = {
     energy: mean(ds.map(d => d.energy)), clarity: mean(ds.map(d => d.clarity)),
-    mood: mean(ds.map(d => d.mood)), sleep: mean(ds.map(d => d.sleep)), hours: mean(ds.map(d => hoursNum(d.hours))),
+    mood: mean(ds.map(d => d.mood)),
+    checks: Object.fromEntries(CHECKS.map(([k]) => [k, mean(ds.map(d => d.checks[k]))])), sleep: mean(ds.map(d => d.sleep)), hours: mean(ds.map(d => hoursNum(d.hours))),
     c: {}, n: ds.filter(anyData).length,
   };
   for (const [k] of CENTERS) a.c[k] = mean(ds.map(d => d.c[k]));
@@ -195,7 +200,11 @@ function field(label, ...kids) { return h("div", { class: "field" }, h("div", { 
 // Tags seen anywhere, most used first, each with a stable colour.
 function known(prop) {
   const n = {};
-  for (const d of Object.values(db.days)) for (const t of d[prop] || []) n[t] = (n[t] || 0) + 1;
+  for (const d of Object.values(db.days)) {
+    const lists = [d[prop] || []];
+    if (prop === "people") for (const f of d.food) lists.push(f.with || []);
+    for (const l of lists) for (const t of l) n[t] = (n[t] || 0) + 1;
+  }
   return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b));
 }
 function tagColor(t) { let s = 0; for (const ch of t) s = (s * 31 + ch.charCodeAt(0)) >>> 0; return TAG_COLORS[s % TAG_COLORS.length]; }
@@ -301,6 +310,12 @@ function renderToday() {
   out.push(card(...SCORES.map(([k, label]) =>
     scaleField(label, d[k], v => { d[k] = v; save(); refreshStrip(); }, { color: GOOD_HIGH, ends: ["low", "high"] }))));
 
+  // Daytime energy check-ins (carried over from the 7-day log)
+  out.push(sec("Energy check-ins", "1 = drained · 10 = full"));
+  out.push(card(...CHECKS.map(([k, label]) =>
+    scaleField(label, d.checks[k] || null, v => { if (v) d.checks[k] = v; else delete d.checks[k]; save(); refreshStrip(); }, { color: GOOD_HIGH })),
+    h("p", { class: "sub" }, "A quick tap at 10, 14 and 18 o'clock. Fill them in later if you miss the moment.")));
+
   // Observations
   out.push(sec("Patterns & observations"));
   out.push(card(
@@ -323,6 +338,15 @@ function renderToday() {
   return out;
 }
 
+// Alone or with someone, and who — names are shared with the People list.
+function companyPicker(f) {
+  if (!f.with) f.with = [];
+  const who = h("div", { style: { display: f.company === "with" ? "" : "none" } }, tagPicker("people", f.with, "Add person"));
+  return h("div", { class: "stack" },
+    choice(COMPANY, f.company || "", v => { f.company = v; if (v !== "with") f.with.length = 0; who.style.display = v === "with" ? "" : "none"; save(); }),
+    who);
+}
+
 // Open spleen: what was eaten, and how it felt 2–4 h later.
 function foodCard(d, isToday) {
   const list = h("div", { class: "stack" });
@@ -335,6 +359,7 @@ function foodCard(d, isToday) {
       x.onclick = () => { if (!f.what || confirm(`Remove “${f.what}”?`)) { d.food.splice(i, 1); save(); draw(); } };
       list.append(h("div", { class: "food" },
         h("div", { class: "row" }, t, h("div", { class: "grow" }, text(f.what, v => { f.what = v; }, { placeholder: "What you ate" })), x),
+        companyPicker(f),
         h("div", { class: "food-later" }, "2–4 hours later"),
         choice(LATER, f.later, v => { f.later = v; save(); }),
         text(f.note, v => { f.note = v; }, { placeholder: "Body response (optional)" })));
@@ -342,7 +367,7 @@ function foodCard(d, isToday) {
     const add = h("button", { type: "button", class: "addbtn" }, "+ Add food");
     add.onclick = () => {
       const now = new Date();
-      d.food.push({ time: isToday ? `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}` : "", what: "", later: "", note: "" });
+      d.food.push({ time: isToday ? `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}` : "", what: "", company: "", with: [], later: "", note: "" });
       save(); draw();
       const inputs = list.querySelectorAll(".food input[type=text]");
       inputs[inputs.length - 1]?.focus();
@@ -401,7 +426,8 @@ function weekCard(w) {
     h("div", {},
       h("div", { class: "kv" }, h("span", {}, "Most symptomatic"), centerLine(ranked[0])),
       h("div", { class: "kv" }, h("span", {}, "Least symptomatic"), centerLine(ranked.length > 1 ? ranked[ranked.length - 1] : null)),
-      avg.hours != null ? h("div", { class: "kv" }, h("span", {}, "Hours slept"), h("span", { class: "v" }, fmt1(avg.hours))) : null),
+      avg.hours != null ? h("div", { class: "kv" }, h("span", {}, "Hours slept"), h("span", { class: "v" }, fmt1(avg.hours))) : null,
+      h("div", { class: "kv" }, h("span", {}, "Energy at 10 · 14 · 18"), h("span", { class: "v" }, CHECKS.map(([k]) => fmt1(avg.checks[k])).join(" · ")))),
     centerBars(avg),
     ...[["env", "Pattern I noticed about environments"], ["food", "Pattern I noticed about food / digestion"],
       ["social", "Pattern I noticed about social interactions"], ["surprise", "Surprise observation from this week"],
@@ -531,6 +557,7 @@ function compareTable(a, b) {
     h("tbody", {},
       row("Energy", a.energy, b.energy, true), row("Clarity", a.clarity, b.clarity, true),
       row("Mood", a.mood, b.mood, true), row("Sleep", a.sleep, b.sleep, true),
+      CHECKS.map(([k, t]) => row(`Energy ${t}`, a.checks[k], b.checks[k], true)),
       CENTERS.map(([k, name, , col]) => row(name, a.c[k], b.c[k], false, col))));
 }
 function patternCards(isos) {
@@ -561,7 +588,8 @@ function patternCards(isos) {
   out.push(card(h("h3", {}, "Food → body 2–4 h later"),
     foodRows.length ? h("div", {}, foodRows.map(f => h("div", { class: "kv" }, h("span", {}, f.name, " ", h("span", { class: "sub" }, `${f.n}×`)),
       h("span", { class: "chips", style: { gap: "4px" } }, LATER.map(([k, , c]) => f[k] ? h("span", { class: "tag", style: { "--cc": c } }, `${f[k]} ${k}`) : null))))) :
-      h("p", {}, "Log meals with how you felt 2–4 hours later to see which foods your spleen reacts to.")));
+      h("p", {}, "Log meals with how you felt 2–4 hours later to see which foods your spleen reacts to."),
+    companyRows(ds)));
 
   // social recovery window
   const resets = ds.filter(([, d]) => d.group && d.reset);
@@ -572,6 +600,23 @@ function patternCards(isos) {
         h("div", { class: "bar grow" }, h("i", { style: { width: `${(n / resets.length) * 100}%`, "--c": c } })), h("span", { class: "sub", style: { width: "20px", "text-align": "right" } }, n));
     })) : h("p", {}, "On days with group time, note how long it took you to reset.")));
   return out;
+}
+
+// Reactions after eating alone vs with each person.
+function companyRows(ds) {
+  const g = {};
+  for (const [, d] of ds) for (const f of d.food) {
+    if (!f.company || !f.later) continue;
+    const keys = f.company === "alone" ? ["Alone"] : (f.with && f.with.length ? f.with : ["With someone"]);
+    for (const k of keys) { const e = g[k] || (g[k] = { fine: 0, mild: 0, strong: 0, n: 0 }); e.n++; e[f.later]++; }
+  }
+  const rows = Object.entries(g).sort((x, y) => y[1].n - x[1].n);
+  if (!rows.length) return null;
+  return h("div", { class: "stack", style: { gap: "4px" } },
+    h("div", { class: "sub", style: { "margin-top": "4px" } }, "Who you ate with"),
+    h("div", {}, rows.map(([k, e]) => h("div", { class: "kv" },
+      h("span", { class: "k" }, h("span", { class: "cdot", style: { "--cc": k === "Alone" ? COMPANY[0][2] : tagColor(k) } }), k, " ", h("span", { class: "sub" }, `${e.n}×`)),
+      h("span", { class: "chips", style: { gap: "4px" } }, LATER.map(([lk, , c]) => e[lk] ? h("span", { class: "tag", style: { "--cc": c } }, `${e[lk]} ${lk}`) : null))))));
 }
 
 /* ---------------- Info ---------------- */
@@ -658,16 +703,16 @@ function csvCell(v) { v = v == null ? "" : String(v); return /[",\n]/.test(v) ? 
 function toCSV() {
   const lbl = (opts, k) => (opts.find(o => o[0] === k) || [, ""])[1];
   const head = ["date", "day", "protocol_day", "sleep_quality", "hours_slept", "woke", "mental_state", "body_sensations",
-    ...CENTERS.map(c => c[0]), "energy", "clarity", "mood", "environments", "environment_note", "people", "people_note",
+    ...CENTERS.map(c => c[0]), "energy", "clarity", "mood", "energy_10", "energy_14", "energy_18", "environments", "environment_note", "people", "people_note",
     "group_time", "reset_time", "food", "food_note", "unusual"];
   const rows = [head];
   for (const iso of Object.keys(db.days).sort()) {
     const d = db.days[iso];
     if (!anyData(d)) continue;
     rows.push([iso, dayNo(iso), protoNo(iso), d.sleep, d.hours, lbl(WOKE, d.woke), d.mind, d.body,
-      ...CENTERS.map(([k]) => d.c[k]), d.energy, d.clarity, d.mood, d.places.join("; "), d.placeNote, d.people.join("; "), d.peopleNote,
+      ...CENTERS.map(([k]) => d.c[k]), d.energy, d.clarity, d.mood, ...CHECKS.map(([k]) => d.checks[k]), d.places.join("; "), d.placeNote, d.people.join("; "), d.peopleNote,
       d.group === true ? "yes" : d.group === false ? "no" : "", lbl(RESET, d.reset),
-      d.food.map(f => [f.time, f.what, f.later && `2-4h: ${lbl(LATER, f.later).toLowerCase()}`, f.note].filter(Boolean).join(" ")).join(" | "),
+      d.food.map(f => [f.time, f.what, f.company === "alone" ? "(alone)" : f.company === "with" ? `(with ${f.with.join(" & ") || "someone"})` : "", f.later && `2-4h: ${lbl(LATER, f.later).toLowerCase()}`, f.note].filter(Boolean).join(" ")).join(" | "),
       d.foodNote, d.unusual]);
   }
   return rows.map(r => r.map(csvCell).join(",")).join("\n");
